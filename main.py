@@ -25,7 +25,7 @@ genai.configure(api_key=gemini_api_key)
 
 # Custom LLM class for Gemini
 class GeminiLLM(LLM):
-    model_name: str = "gemini-1.5-flash"  # Corrected to a valid model name
+    model_name: str = "gemini-2.0-flash"  # Corrected to a valid model name
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
         try:
