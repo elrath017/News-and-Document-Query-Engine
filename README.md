@@ -60,7 +60,7 @@ A Streamlit app for querying news articles and documents using Google's Gemini L
    - Select repo, set `main.py` as the main file.
    - Add `GEMINI_API_KEY` in environment variables.
 
-3. Access at `url`.
+3. Access at `https://query-engine.streamlit.app/`.
 
 *Note*: GitHub Pages is not supported (requires Python server). Use Streamlit Cloud or similar.
 
