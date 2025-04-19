@@ -25,7 +25,7 @@ genai.configure(api_key=gemini_api_key)
 
 # Custom LLM class for Gemini
 class GeminiLLM(LLM):
-    model_name: str = "gemini-2.0-flash"  # Updated to a valid model name
+    model_name: str = "gemini-1.5-flash"  # Corrected to a valid model name
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
         try:
@@ -44,9 +44,13 @@ class GeminiLLM(LLM):
         return "gemini"
 
 # Custom embedding class using Sentence Transformers, compatible with LangChain
+@st.cache_resource
+def _load_sentence_transformer_model(model_name: str = "all-MiniLM-L6-v2"):
+    return SentenceTransformer(model_name)
+
 class SentenceTransformerEmbeddings(Embeddings):
-    def __init__(self, model_name: str = "all-mpnet-base-v2"):
-        self.model = SentenceTransformer(model_name)
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        self.model = _load_sentence_transformer_model(model_name)
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         return self.model.encode(texts, convert_to_tensor=False).tolist()
@@ -54,17 +58,45 @@ class SentenceTransformerEmbeddings(Embeddings):
     def embed_query(self, text: str) -> List[float]:
         return self.model.encode([text], convert_to_tensor=False)[0].tolist()
 
+# Cache document loading
+@st.cache_data
+def load_url_documents(_urls: List[str]) -> List[Any]:
+    if not _urls:
+        return []
+    url_loader = UnstructuredURLLoader(urls=_urls)
+    return url_loader.load()
+
+@st.cache_data
+def load_file_document(_file_path: str) -> List[Any]:
+    doc_loader = UnstructuredFileLoader(_file_path)
+    return doc_loader.load()
+
+# Cache document splitting
+@st.cache_data
+def split_documents(_docs: List[Any]) -> List[Any]:
+    text_splitter = RecursiveCharacterTextSplitter(
+        separators=['\n\n', '\n', '.', ','],
+        chunk_size=500,  # Reduced for lower memory usage
+        chunk_overlap=50
+    )
+    return text_splitter.split_documents(_docs)
+
+# Cache FAISS vector store creation
+@st.cache_resource
+def create_vectorstore(_docs: List[Any], _embeddings: Embeddings):
+    return FAISS.from_documents(_docs, _embeddings)
+
 # Streamlit app setup
 st.title("News And Document Query Engine 📈")
 st.sidebar.title("News Article URLs and Documents")
 
 # Initialize session state for URLs, query, and response
 if "urls" not in st.session_state:
-    st.session_state.urls = [""] * 3  # Initialize with 3 empty strings
+    st.session_state.urls = [""] * 3
 if "query" not in st.session_state:
     st.session_state.query = ""
 if "response" not in st.session_state:
-    st.session_state.response = None  # Store answer and sources
+    st.session_state.response = None
 
 # URL inputs
 for i in range(3):
@@ -82,62 +114,51 @@ with col2:
 
 # Clear URLs logic
 if clear_urls_clicked:
-    st.session_state.urls = [""] * 3  # Reset URLs to empty strings
-    st.rerun()  # Rerun to update the UI
+    st.session_state.urls = [""] * 3
+    st.rerun()
 
 file_path = "faiss_store_gemini.pkl"
 main_placeholder = st.empty()
 llm = GeminiLLM()
 
 if process_clicked:
-    # Initialize list to hold all documents
     all_docs = []
 
     # Process URLs
     urls = [url for url in st.session_state.urls if url.strip()]
     if urls:
         main_placeholder.text("Loading URLs...Started...✅✅✅")
-        url_loader = UnstructuredURLLoader(urls=urls)
-        url_docs = url_loader.load()
+        url_docs = load_url_documents(urls)
         all_docs.extend(url_docs)
 
     # Process uploaded documents
     if uploaded_files:
         main_placeholder.text("Loading Documents...Started...✅✅✅")
         for uploaded_file in uploaded_files:
-            # Save uploaded file to temporary location
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
                 tmp_file.write(uploaded_file.read())
                 tmp_file_path = tmp_file.name
 
-            # Load document using UnstructuredFileLoader
-            doc_loader = UnstructuredFileLoader(tmp_file_path)
-            doc = doc_loader.load()
+            doc = load_file_document(tmp_file_path)
             all_docs.extend(doc)
-
-            # Clean up temporary file
             os.unlink(tmp_file_path)
 
     # Check if any data was loaded
     if not all_docs:
         st.error("Please provide at least one valid URL or document.")
     else:
-        # Split data
-        text_splitter = RecursiveCharacterTextSplitter(
-            separators=['\n\n', '\n', '.', ','],
-            chunk_size=1000
-        )
         main_placeholder.text("Text Splitter...Started...✅✅✅")
-        docs = text_splitter.split_documents(all_docs)
-        # Create embeddings and save to FAISS index
-        embeddings = SentenceTransformerEmbeddings()
-        vectorstore_gemini = FAISS.from_documents(docs, embeddings)
-        main_placeholder.text("Embedding Vector Started Building...✅✅✅")
-        time.sleep(2)
+        docs = split_documents(all_docs)
+        if not docs:
+            st.error("No valid document chunks created. Check input content.")
+        else:
+            embeddings = SentenceTransformerEmbeddings()
+            vectorstore_gemini = create_vectorstore(docs, embeddings)
+            main_placeholder.text("Embedding Vector Started Building...✅✅✅")
+            time.sleep(2)
 
-        # Save the FAISS index to a pickle file
-        with open(file_path, "wb") as f:
-            pickle.dump(vectorstore_gemini, f)
+            with open(file_path, "wb") as f:
+                pickle.dump(vectorstore_gemini, f)
 
 # Query section
 query = st.text_input("Question: ", value=st.session_state.query, key="query_input")
@@ -149,9 +170,9 @@ with col3:
 
 # Clear query logic
 if clear_query:
-    st.session_state.query = ""  # Reset query
-    st.session_state.response = None  # Clear response
-    st.rerun()  # Rerun to update the UI
+    st.session_state.query = ""
+    st.session_state.response = None
+    st.rerun()
 
 # Submit query logic
 if submit_query and query:
@@ -163,7 +184,6 @@ if submit_query and query:
                     llm=llm, retriever=vectorstore.as_retriever()
                 )
                 result = chain({"question": query}, return_only_outputs=True)
-                # Store result in session state
                 st.session_state.response = result
     else:
         st.error("Please process URLs or documents first to create the FAISS index.")
@@ -174,11 +194,9 @@ elif submit_query and not query:
 if st.session_state.response:
     st.header("Answer")
     st.write(st.session_state.response["answer"])
-
-    # Display sources, if available
     sources = st.session_state.response.get("sources", "")
     if sources:
         st.subheader("Sources:")
-        sources_list = sources.split("\n")  # Split sources by newline
+        sources_list = sources.split("\n")
         for source in sources_list:
             st.write(source)
