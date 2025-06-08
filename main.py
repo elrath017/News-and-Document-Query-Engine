@@ -447,6 +447,13 @@ def run_app():
     # Clear URLs logic
     if clear_urls_clicked:
         st.session_state.urls = [""] * 3
+        # Delete the FAISS pickle file if it exists
+        file_path = "faiss_store_gemini.pkl"
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                st.warning(f"Could not delete FAISS index: {e}")
         st.rerun()
 
     # Query section
