@@ -107,46 +107,176 @@ class GraphState(TypedDict):
 # LangGraph Nodes
 def process_documents(state: GraphState) -> GraphState:
     """Process URLs and uploaded documents, create FAISS vector store."""
-    logger.info("Processing documents")
+    
+    # Check if this is a query against an existing index without new files/URLs
+    # `state.get("vectorstore")` checks if a vectorstore was loaded (during query submission)
+    # `not state.get("uploaded_files")` checks if no new files are being uploaded now
+    # `not any(url.strip() for url in state.get("urls", []))` checks if no new URLs are provided
+    # The `process_clicked` logic in Streamlit sets `uploaded_files` from the uploader and `urls` from text inputs.
+    # When submitting a query, `uploaded_files` is explicitly set to [] and `urls` are from session_state (potentially stale but checked by any()).
+    
+    # A more direct way to distinguish might be a flag in the state, e.g., "force_process": True/False.
+    # For now, we infer from the presence of a vectorstore and absence of new inputs.
+    
+    # Retrieve current URLs and uploaded_files from state
+    # current_urls = [url for url in state.get("urls", []) if url.strip()] # Not needed for the refined condition
+    current_uploaded_files = state.get("uploaded_files", [])
+
+    # If a vectorstore exists (i.e., loaded from .pkl for a query) AND 
+    # no new files are being explicitly uploaded now (i.e., state["uploaded_files"] is empty,
+    # which is true when "Submit Question" is clicked), then we are in query mode.
+    # Stale URLs in state.get("urls") should not trigger reprocessing in this query mode.
+    if state.get("vectorstore") and not current_uploaded_files:
+        logger.info("Skipping document processing: existing vectorstore found and no new files currently uploaded (query mode).")
+        # Ensure essential fields are passed through correctly.
+        # 'documents' here would be the chunked documents from the last processing run, if they were kept in state
+        # from the initial processing, or an empty list if not. The primary need is the vectorstore.
+        # Or, it could be an empty list if not explicitly preserved through query states.
+        # For querying, the primary need is the vectorstore.
+        return {
+            **state,
+            "documents": state.get("documents", []), # Preserve existing chunked documents if available
+            "error": None # Ensure no error is set by this node in query mode
+        }
+
+    logger.info("Proceeding with document processing: new documents/URLs provided or no existing vectorstore.")
     all_docs = []
+    file_processing_warnings = []
+    processed_doc_count = 0
+
+    # Initialize debug_info if not present and ensure file_processing_warnings list exists
+    current_debug_info = state.get("debug_info", {})
+    if "file_processing_warnings" not in current_debug_info:
+        current_debug_info["file_processing_warnings"] = []
+
 
     # Process URLs
     urls = [url for url in state["urls"] if url.strip()]
     if urls:
-        url_docs = load_url_documents(urls)
-        all_docs.extend(url_docs)
+        try:
+            logger.info(f"Loading documents from URLs: {urls}")
+            url_docs = load_url_documents(urls) # This is cached
+            if url_docs:
+                # Filter out None or empty documents that might come from loader
+                valid_url_docs = [doc for doc in url_docs if doc and doc.page_content and doc.page_content.strip()]
+                if valid_url_docs:
+                    all_docs.extend(valid_url_docs)
+                    processed_doc_count += len(valid_url_docs) 
+                    logger.info(f"Successfully loaded {len(valid_url_docs)} non-empty documents from URLs.")
+                else:
+                    logger.warning(f"URLs {urls} loaded but resulted in no valid content.")
+                    file_processing_warnings.append(f"URLs {', '.join(urls)} yielded no extractable content.")
+            else:
+                logger.warning(f"No documents returned from loading URLs: {urls}")
+                file_processing_warnings.append(f"Could not retrieve any content from URLs: {', '.join(urls)}.")
+        except Exception as e:
+            logger.error(f"Failed to load documents from URLs {urls}: {e}", exc_info=True)
+            file_processing_warnings.append(f"Error processing URLs ({', '.join(urls)}): {type(e).__name__}")
 
     # Process uploaded documents
     uploaded_files = state.get("uploaded_files", [])
     if uploaded_files:
         for uploaded_file in uploaded_files:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-                tmp_file.write(uploaded_file.read())
-                tmp_file_path = tmp_file.name
+            tmp_file_path = None 
             try:
-                doc = load_file_document(tmp_file_path)
-                all_docs.extend(doc)
+                # Create a temporary file to store the uploaded content
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                    tmp_file.write(uploaded_file.read())
+                    tmp_file_path = tmp_file.name
+                
+                logger.info(f"Attempting to load file: {uploaded_file.name} from {tmp_file_path}")
+                loaded_docs_from_file = load_file_document(tmp_file_path) # This is cached
+
+                if not loaded_docs_from_file:
+                    logger.warning(f"File {uploaded_file.name} loaded but resulted in no document objects.")
+                    file_processing_warnings.append(f"File '{uploaded_file.name}' loaded but was empty or structureless.")
+                else:
+                    non_empty_docs = []
+                    for single_doc in loaded_docs_from_file: # UnstructuredFileLoader returns a list
+                        if single_doc.page_content and single_doc.page_content.strip():
+                            # Update metadata source to original filename
+                            single_doc.metadata["source"] = uploaded_file.name 
+                            non_empty_docs.append(single_doc)
+                        else:
+                            logger.warning(f"Part of file {uploaded_file.name} resulted in empty page content.")
+                    
+                    if non_empty_docs:
+                        all_docs.extend(non_empty_docs)
+                        processed_doc_count += 1 
+                        logger.info(f"Successfully loaded and processed file: {uploaded_file.name} (source updated) with {len(non_empty_docs)} non-empty parts.")
+                    else:
+                        logger.warning(f"File {uploaded_file.name} resulted in no non-empty document parts after processing.")
+                        file_processing_warnings.append(f"File '{uploaded_file.name}' loaded but contained no extractable text after processing all its parts.")
+                        
+            except Exception as e:
+                logger.error(f"Failed to load file {uploaded_file.name}: {e}", exc_info=True)
+                file_processing_warnings.append(f"File '{uploaded_file.name}' could not be processed. Error: {type(e).__name__}. Check logs for details.")
             finally:
-                os.unlink(tmp_file_path)
+                if tmp_file_path and os.path.exists(tmp_file_path):
+                    os.unlink(tmp_file_path)
+                elif tmp_file_path: 
+                    logger.warning(f"Temporary file {tmp_file_path} for {uploaded_file.name} was expected but not found for deletion.")
 
-    if not all_docs:
+    # Update debug_info with any warnings collected
+    current_debug_info["file_processing_warnings"].extend(file_processing_warnings)
+    # Remove duplicates if any, though order might change
+    current_debug_info["file_processing_warnings"] = list(set(current_debug_info["file_processing_warnings"]))
+
+
+    if not all_docs: 
+        error_message = "No processable content found in URLs or documents."
+        if current_debug_info["file_processing_warnings"]:
+            error_message += " Issues encountered: " + "; ".join(current_debug_info["file_processing_warnings"])
+        elif not urls and not uploaded_files: # Explicitly check if inputs were missing
+             error_message = "Please provide at least one URL or document to process."
         return {
             **state,
-            "error": "Please provide at least one valid URL or document.",
+            "error": error_message,
             "documents": [],
-            "vectorstore": None
+            "vectorstore": None,
+            "debug_info": current_debug_info
         }
 
-    docs = split_documents(all_docs)
-    if not docs:
+    docs_for_faiss = split_documents(all_docs) 
+    if not docs_for_faiss: 
+        error_message = "Content was loaded, but no text chunks could be created after splitting. This might happen with very short texts or unusual content structure."
+        if current_debug_info["file_processing_warnings"]:
+             error_message += " Initial loading/processing issues: " + "; ".join(current_debug_info["file_processing_warnings"])
         return {
             **state,
-            "error": "No valid document chunks created. Check input content.",
-            "documents": [],
-            "vectorstore": None
+            "error": error_message,
+            "documents": all_docs, # Keep original loaded docs for debug, though splitting failed
+            "vectorstore": None,
+            "debug_info": current_debug_info
         }
+    
+    logger.info(f"Successfully processed {processed_doc_count} source(s), resulting in {len(docs_for_faiss)} text chunks for the FAISS index.")
 
     embeddings = SentenceTransformerEmbeddings()
+    vectorstore = FAISS.from_documents(docs_for_faiss, embeddings)
+    file_path = "faiss_store_gemini.pkl"
+    with open(file_path, "wb") as f:
+        pickle.dump(vectorstore, f)
+
+    # If there were warnings but processing was otherwise successful, store them for display
+    # but don't set a global error. The main success message will show.
+    # Warnings will be in debug_info.
+    final_error = None
+    if not processed_doc_count and (urls or uploaded_files): # If inputs were given but nothing came out
+        final_error = "No documents were successfully processed despite inputs. Check warnings in debug info."
+        if current_debug_info["file_processing_warnings"]:
+             final_error += " Issues: " + "; ".join(current_debug_info["file_processing_warnings"])
+
+
+    return {
+        **state,
+        "documents": docs_for_faiss, 
+        "vectorstore": vectorstore,
+        "error": final_error, # Set error only if overall processing effectively failed
+        "debug_info": current_debug_info 
+    }
+
+def retrieve_documents(state: GraphState) -> GraphState:
     vectorstore = FAISS.from_documents(docs, embeddings)
     file_path = "faiss_store_gemini.pkl"
     with open(file_path, "wb") as f:
@@ -452,8 +582,16 @@ def run_app():
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
+                logger.info(f"Deleted FAISS index file: {file_path}")
             except Exception as e:
                 st.warning(f"Could not delete FAISS index: {e}")
+                logger.warning(f"Error deleting FAISS index {file_path}: {e}")
+
+        # Clear Streamlit's caches
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        logger.info("Cleared Streamlit data and resource caches.")
+        
         st.rerun()
 
     # Query section
@@ -497,11 +635,20 @@ def run_app():
             }
             # Run only document processing
             result = workflow.invoke(state, {"configurable": {"process_documents": True}})
+            st.session_state.debug_info = result.get("debug_info", {}) # Update debug_info from processing result
+
             if result["error"]:
                 st.error(result["error"])
             else:
                 main_placeholder = st.empty()
                 main_placeholder.success("Documents processed successfully! ✅")
+            
+            # Display file processing warnings immediately if any, even on success
+            if st.session_state.debug_info and st.session_state.debug_info.get("file_processing_warnings"):
+                st.warning("Some issues were encountered during document processing:")
+                for warning_msg in st.session_state.debug_info["file_processing_warnings"]:
+                    st.markdown(f"- {warning_msg}")
+
 
     if submit_query and query:
         if len(query.strip()) < 3:
@@ -582,6 +729,14 @@ def run_app():
                 for url in st.session_state.debug_info["tavily_urls"]:
                     domain = urlparse(url).netloc
                     st.write(f"- [{domain}]({url})")
+
+            # Display File Processing Warnings if available
+            if "file_processing_warnings" in st.session_state.debug_info and st.session_state.debug_info["file_processing_warnings"]:
+                st.write("**File Processing Warnings/Errors:**")
+                for warning_msg in st.session_state.debug_info["file_processing_warnings"]:
+                    # Use st.markdown for potentially better formatting, though st.write is fine
+                    st.markdown(f"- {warning_msg}")
+
 
 if __name__ == "__main__":
     run_app()
