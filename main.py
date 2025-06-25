@@ -276,20 +276,21 @@ def process_documents(state: GraphState) -> GraphState:
         "debug_info": current_debug_info 
     }
 
-def retrieve_documents(state: GraphState) -> GraphState:
-    vectorstore = FAISS.from_documents(docs, embeddings)
-    file_path = "faiss_store_gemini.pkl"
-    with open(file_path, "wb") as f:
-        pickle.dump(vectorstore, f)
+# This is the duplicated, erroneous version of retrieve_documents. It will be removed.
+# def retrieve_documents(state: GraphState) -> GraphState:
+#     vectorstore = FAISS.from_documents(docs, embeddings)
+#     file_path = "faiss_store_gemini.pkl"
+#     with open(file_path, "wb") as f:
+#         pickle.dump(vectorstore, f)
+# 
+#     return {
+#         **state,
+#         "documents": docs,
+#         "vectorstore": vectorstore,
+#         "error": None
+#     }
 
-    return {
-        **state,
-        "documents": docs,
-        "vectorstore": vectorstore,
-        "error": None
-    }
-
-def retrieve_documents(state: GraphState) -> GraphState:
+def retrieve_documents(state: GraphState) -> GraphState: # This is the correct definition
     """Retrieve documents from FAISS and check relevance."""
     logger.info(f"Retrieving documents for query: {state['query']}")
     if state.get("error"):
