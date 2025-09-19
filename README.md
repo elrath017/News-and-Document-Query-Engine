@@ -1,3 +1,12 @@
+---
+title: News and Document Query Engine
+emoji: 📈
+colorFrom: blue
+colorTo: green
+sdk: streamlit
+app_file: main.py
+python_version: 3.10
+---
 # News and Document Query Engine
 
 A modern Streamlit app for querying news articles and documents using advanced retrieval, LLM-based QA, and optional web search fallback.
